@@ -334,6 +334,16 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    control_vectors: Optional[List[dict]] = Field(
+        default=None,
+        description="A list of dict with keys `name` and `strength`. "
+        "The specified control vectors will be applied with the defined strengths.",
+    )
+    
+    # _others: Optional[Dict[str, str]] = Field(
+    #     default=None,
+    #     description="A placeholder for additional params. These will be sent as kwargs"
+    # )
 
     # doc: end-completion-extra-params
 

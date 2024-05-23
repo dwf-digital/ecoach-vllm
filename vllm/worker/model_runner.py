@@ -129,6 +129,13 @@ class ModelRunner:
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
+        # self._save_queue = Queue()
+
+        # filepath = os.path.abspath(__file__)
+        # root_dir = os.path.abspath(os.path.join(filepath, "..", "..", ".."))
+
+        # self._save_dir = f"{root_dir}/data/hidden states"
+
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
@@ -703,6 +710,29 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
+
+        # if (
+        #     isinstance(model_executable, CUDAGraphRunner)
+        #     or seq_group_metadata_list[0].control_vectors is None
+        #     or not seq_group_metadata_list[0].control_vectors.save_hidden_states
+        # ):
+        #     hidden_states = model_executable(**execute_model_kwargs)
+        # else:
+        #     hidden_states, hidden_layers = model_executable(**execute_model_kwargs)
+
+        #     self._save_thread = Thread(
+        #         target=self._save_hidden_states, name="Hidden states saver"
+        #     )
+        #     self._save_thread.start()
+
+        #     for i, layer in enumerate(hidden_layers):
+        #         is_last = False
+        #         if i == len(hidden_layers) - 1:
+        #             is_last = True
+        #         self._save_queue.put_nowait(
+        #             HiddenStatesData(hidden_states=layer, layer_num=i, is_last=is_last)
+        #         )
+
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.

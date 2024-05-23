@@ -19,6 +19,7 @@ from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
+from vllm.control_vectors.data import ControlVectorData
 
 logger = init_logger(__name__)
 
@@ -119,12 +120,18 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
+                control_vectors = []
+                if request.control_vectors is not None:
+                    for cv in request.control_vectors:
+                        control_vectors.append(ControlVectorData(**cv))
+
                 generators.append(
                     self.engine.generate(prompt_text,
                                          sampling_params,
                                          f"{request_id}-{i}",
                                          prompt_token_ids=prompt_ids,
-                                         lora_request=lora_request))
+                                         lora_request=lora_request,
+                                         control_vectors=control_vectors))
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

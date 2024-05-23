@@ -48,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
+from vllm.control_vectors.data import ControlVectorData, ControlVector
 
 
 class LlamaMLP(nn.Module):
@@ -278,6 +279,7 @@ class LlamaModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
+        control_vectors: Optional[List[ControlVectorData]] = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -293,7 +295,23 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
+        
+        if control_vectors is not None:
+            # if control_vectors.save_hidden_states:
+            #     hidden_layers.append(hidden_states.clone())
+            for cv in control_vectors:
+                if cv.layers is not None:
+                    if i in cv.layers:
+                        hidden_states += (
+                            self.cvec[cv.name][i] * cv.strength
+                        )
+
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        # if control_vectors is not None:
+        #     if control_vectors.save_hidden_states:
+        #         return hidden_states, hidden_layers
+
         return hidden_states
 
 

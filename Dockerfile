@@ -138,5 +138,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+COPY data /usr/local/lib/python3.10/dist-packages/data
+
+# ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server", "--model", "MaziyarPanahi/Meta-Llama-3-8B-Instruct-GPTQ", "--dtype", "float16"]
 #################### OPENAI API SERVER ####################

@@ -26,6 +26,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import LlamaConfig
+import json
+import os
+from queue import Queue
+from threading import Thread, Event
+import numpy as np
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -49,6 +54,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 from vllm.control_vectors.data import ControlVectorData, ControlVector
+
+
+ROOT_DIR = os.path.join(os.path.abspath(__file__), "..", "..", "..", "..")
 
 
 class LlamaMLP(nn.Module):
@@ -269,6 +277,24 @@ class LlamaModel(nn.Module):
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        cvec_layers = list(range(15, 27))
+        self.cvec: dict[ControlVector] = {}
+
+        cvec_dir = os.path.abspath(f"{ROOT_DIR}/data/control_vectors")
+        cvec_files = os.listdir(cvec_dir)
+
+        for fn in cvec_files:
+            cvec_path = f"{cvec_dir}/{fn}"
+            with open(cvec_path, "r") as f:
+                cvec = ControlVector(**json.load(f))
+
+                self.cvec[cvec.name] = {
+                    int(k): torch.tensor(v, dtype=torch.bfloat16, device="cuda:0")
+                    for k, v in cvec.directions.items()
+                    if int(k) in cvec_layers
+                }
+            print(f"Initialised control vector: [{cvec.name}] from [{cvec_path}]")
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -280,6 +306,7 @@ class LlamaModel(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
         control_vectors: Optional[List[ControlVectorData]] = None,
+        **kwargs,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -378,9 +405,12 @@ class LlamaForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        control_vectors: Optional[ControlVectorData] = None,
+        **kwargs,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+        hidden_states = self.model(
+            input_ids, positions, kv_caches, attn_metadata, control_vectors=control_vectors, **kwargs
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,

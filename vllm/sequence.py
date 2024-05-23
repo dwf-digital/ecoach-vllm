@@ -9,6 +9,7 @@ from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.control_vectors.data import ControlVectorData
 
 if TYPE_CHECKING:
     import torch
@@ -225,6 +226,7 @@ class Sequence:
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
+        control_vectors: Optional[ControlVectorData] = None
     ) -> None:
         self.seq_id = seq_id
         self.prompt = prompt
@@ -247,6 +249,8 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+        self.control_vectors = control_vectors
 
     @property
     def lora_int_id(self) -> int:
@@ -406,6 +410,18 @@ class MultiModalData:
         self.data = data
 
 
+class ControlVectorData:
+    """Control Vector request
+
+    Args:
+        name(str): Name of the control vector to use
+        strength(float): The strength to apply to the control vector
+    """
+
+    name: str
+    strength: float
+
+
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
 
@@ -432,6 +448,7 @@ class SequenceGroup:
         multi_modal_data: Optional[MultiModalData] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
+        control_vectors: Optional[ControlVectorData] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -447,6 +464,7 @@ class SequenceGroup:
         self.multi_modal_data = multi_modal_data
         self.embeddings = embeddings
         self.pooling_params = pooling_params
+        self.control_vectors = control_vectors
 
     @property
     def prompt(self) -> str:
@@ -623,6 +641,7 @@ class SequenceGroupMetadata:
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -636,6 +655,7 @@ class SequenceGroupMetadata:
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
+        self.control_vectors = control_vectors
 
         # The number of speculative tokens adopted in this request.
         # None means specuative decoding is not used.

@@ -5,6 +5,8 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from dataclasses import dataclass, field
+from queue import Empty
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
@@ -135,6 +137,27 @@ class ModelRunner:
         # root_dir = os.path.abspath(os.path.join(filepath, "..", "..", ".."))
 
         # self._save_dir = f"{root_dir}/data/hidden states"
+
+    def _save_hidden_states(self):
+        import traceback
+
+        while True:
+            try:
+                data: HiddenStatesData = self._save_queue.get_nowait()
+                layer_num = data.layer_num
+                save_path = f"{self._save_dir}/{layer_num}.pt"
+                torch.save(data.hidden_states, save_path)
+                if data.is_last:
+                    print("Successfully saved hidden states")
+                    break
+            except KeyboardInterrupt:
+                self._save_event.set()
+                break
+            except Empty:
+                pass
+            except Exception as e:
+                print(f"Error layer {data.layer_num}: {e}")
+                traceback.print_exc()
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -707,6 +730,10 @@ class ModelRunner:
             "positions": input_positions,
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
+            "return_hidden_states": True,
+            "control_vectors": seq_group_metadata_list[
+                0
+            ].control_vectors,  # assumes all use the same
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
@@ -934,6 +961,13 @@ class ModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+    
+
+@dataclass
+class HiddenStatesData:
+    hidden_states: torch.Tensor
+    layer_num: int
+    is_last: bool = field(default_factory=False)
 
 
 class CUDAGraphRunner:
@@ -949,6 +983,27 @@ class CUDAGraphRunner:
     def graph(self):
         assert self._graph is not None
         return self._graph
+    
+    def _save_hidden_states(self):
+        import traceback
+
+        while True:
+            try:
+                data: HiddenStatesData = self._save_queue.get_nowait()
+                layer_num = data.layer_num
+                save_path = f"{self._save_dir}/{layer_num}.pt"
+                torch.save(data.hidden_states, save_path)
+                print(f"Saved {layer_num} to {save_path}")
+                if data.is_last:
+                    break
+            except KeyboardInterrupt:
+                self._save_event.set()
+                break
+            except Empty:
+                pass
+            except Exception as e:
+                print(f"Error layer {data.layer_num}: {e}")
+                traceback.print_exc()
 
     def capture(
         self,

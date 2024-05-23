@@ -14,6 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
+from vllm.control_vectors.data import ControlVectorData
 
 logger = init_logger(__name__)
 
@@ -147,6 +148,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -290,6 +292,8 @@ class LLM:
                 type=multi_modal_data.type,
                 data=multi_modal_data.data[i].unsqueeze(0),
             ) if multi_modal_data else None
+            # ) if multi_modal_data else None,
+            # control_vectors=control_vectors
 
             requests_data.append({
                 "prompt":
@@ -313,6 +317,7 @@ class LLM:
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
@@ -320,7 +325,8 @@ class LLM:
                                     params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
-                                    multi_modal_data=multi_modal_data)
+                                    multi_modal_data=multi_modal_data,
+                                    control_vectors=control_vectors)
 
     def _run_engine(
             self, use_tqdm: bool

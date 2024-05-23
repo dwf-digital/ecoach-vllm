@@ -34,6 +34,7 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter
+from vllm.control_vectors.data import ControlVectorData
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -369,6 +370,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -434,7 +436,7 @@ class LLMEngine:
             logger.warning("Use None for EOS token id because tokenizer is "
                            "not initialized")
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       eos_token_id, lora_request)
+                       eos_token_id, lora_request, control_vectors=control_vectors)
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -445,6 +447,7 @@ class LLMEngine:
                 arrival_time,
                 lora_request,
                 multi_modal_data,
+                control_vectors,
             )
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -454,6 +457,7 @@ class LLMEngine:
                 arrival_time,
                 lora_request,
                 multi_modal_data,
+                control_vectors,
             )
         else:
             raise ValueError(
@@ -470,6 +474,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -496,7 +501,8 @@ class LLMEngine:
                                   arrival_time=arrival_time,
                                   sampling_params=sampling_params,
                                   lora_request=lora_request,
-                                  multi_modal_data=multi_modal_data)
+                                  multi_modal_data=multi_modal_data,
+                                  control_vectors=control_vectors)
 
         return seq_group
 
@@ -508,6 +514,7 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vectors: Optional[ControlVectorData] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with PoolingParams."""
         # Defensive copy of PoolingParams, which are used by the pooler
@@ -518,7 +525,8 @@ class LLMEngine:
                                   arrival_time=arrival_time,
                                   lora_request=lora_request,
                                   multi_modal_data=multi_modal_data,
-                                  pooling_params=pooling_params)
+                                  pooling_params=pooling_params,
+                                  control_vectors=control_vectors)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:

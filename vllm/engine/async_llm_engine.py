@@ -535,6 +535,7 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vector_data: Optional[ControlVectorData] = None,
     ) -> AsyncStream:
         if self.log_requests:
             shortened_prompt = prompt
@@ -586,6 +587,7 @@ class AsyncLLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
+            control_vector_data=control_vector_data,
         )
 
         return stream
@@ -597,7 +599,8 @@ class AsyncLLMEngine:
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None
+        multi_modal_data: Optional[MultiModalData] = None,
+        control_vector_data: Optional[ControlVectorData] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -760,6 +763,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        control_vector_data: Optional[ControlVectorData] = None,
     ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
@@ -773,6 +777,7 @@ class AsyncLLMEngine:
             arrival_time=arrival_time,
             lora_request=lora_request,
             multi_modal_data=multi_modal_data,
+            control_vector_data=control_vector_data,
         )
 
         try:

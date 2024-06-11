@@ -19,30 +19,30 @@
 # limitations under the License.
 """Inference-only BaiChuan model compatible with HuggingFace weights."""
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 
@@ -78,17 +78,17 @@ class BaiChuanMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
+            linear_method=linear_method)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           quant_config=quant_config)
+                                           linear_method=linear_method)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -111,8 +111,7 @@ class BaiChuanAttention(nn.Module):
         position_embedding: str,
         rope_theta: float = 10000,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -134,13 +133,13 @@ class BaiChuanAttention(nn.Module):
             self.total_num_heads,
             self.total_num_heads,
             bias=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         # Create the alibi slopes and slice them.
         if self.postion_embedding == "ALIBI":
@@ -154,8 +153,7 @@ class BaiChuanAttention(nn.Module):
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   scaling,
-                                  alibi_slopes=alibi_slopes,
-                                  quant_config=quant_config)
+                                  alibi_slopes=alibi_slopes)
         else:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -164,11 +162,7 @@ class BaiChuanAttention(nn.Module):
                 base=self.rope_theta,
             )
             self.scaling = self.head_dim**-0.5
-            self.attn = Attention(self.num_heads,
-                                  self.head_dim,
-                                  self.scaling,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
+            self.attn = Attention(self.num_heads, self.head_dim, self.scaling)
 
     def forward(
         self,
@@ -191,8 +185,7 @@ class BaiChuanDecoderLayer(nn.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  position_embedding: str,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -204,14 +197,13 @@ class BaiChuanDecoderLayer(nn.Module):
             position_embedding=position_embedding,
             rope_theta=rope_theta,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.mlp = BaiChuanMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -252,8 +244,7 @@ class BaiChuanModel(nn.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  position_embedding: str,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -264,8 +255,7 @@ class BaiChuanModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            BaiChuanDecoderLayer(config, position_embedding, cache_config,
-                                 quant_config)
+            BaiChuanDecoderLayer(config, position_embedding, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -314,15 +304,13 @@ class BaiChuanBaseForCausalLM(nn.Module):
         self,
         config,
         position_embedding: str,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.model = BaiChuanModel(config, position_embedding, cache_config,
-                                   quant_config)
+        self.linear_method = linear_method
+        self.model = BaiChuanModel(config, position_embedding, linear_method)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -352,14 +340,19 @@ class BaiChuanBaseForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self,
+                     model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
             if "rotary_emb.inv_freq" in name:
                 continue
             if name == "lm_head.weight":
@@ -401,16 +394,13 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         if config.hidden_size == 4096:  # baichuan2 7b
-            super().__init__(config, "ROPE", cache_config, quant_config,
-                             lora_config)
+            super().__init__(config, "ROPE", linear_method, lora_config)
         else:  # baichuan 13b, baichuan2 13b
-            super().__init__(config, "ALIBI", cache_config, quant_config,
-                             lora_config)
+            super().__init__(config, "ALIBI", linear_method, lora_config)
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
@@ -419,9 +409,7 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(config, "ROPE", cache_config, quant_config,
-                         lora_config)
+        super().__init__(config, "ROPE", linear_method, lora_config)

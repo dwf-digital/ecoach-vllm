@@ -16,22 +16,20 @@ def test_prefix(llm=None, sampling_params=None, prompts=None):
 
 
 def main(args):
-    llm = LLM(model=args.model,
+    llm = LLM(model="baichuan-inc/Baichuan2-13B-Chat",
               tokenizer_mode='auto',
               trust_remote_code=True,
               enforce_eager=True,
-              use_v2_block_manager=args.use_v2_block_manager,
-              tensor_parallel_size=args.tensor_parallel_size,
               enable_prefix_caching=args.enable_prefix_caching)
 
     num_prompts = 100
     prompts = [PROMPT] * num_prompts
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0, max_tokens=100)
 
     print("------warm up------")
     test_prefix(
         llm=llm,
-        prompts=prompts,
+        prompts=prompts[:1],
         sampling_params=sampling_params,
     )
 
@@ -47,16 +45,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Benchmark the performance with or without automatic '
         'prefix caching.')
-    parser.add_argument('--model',
-                        type=str,
-                        default='baichuan-inc/Baichuan2-13B-Chat')
-    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--output-len', type=int, default=10)
     parser.add_argument('--enable-prefix-caching',
                         action='store_true',
                         help='enable prefix caching')
-    parser.add_argument('--use-v2-block-manager',
-                        action='store_true',
-                        help='Use BlockSpaceMangerV2')
     args = parser.parse_args()
     main(args)

@@ -10,8 +10,6 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
-
 
 def sample_requests(
     dataset_path: str,
@@ -76,49 +74,46 @@ def run_vllm(
     quantization_param_path: Optional[str],
     device: str,
     enable_prefix_caching: bool,
-    enable_chunked_prefill: bool,
-    max_num_batched_tokens: int,
     gpu_memory_utilization: float = 0.9,
     download_dir: Optional[str] = None,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=model,
-        tokenizer=tokenizer,
-        quantization=quantization,
-        tensor_parallel_size=tensor_parallel_size,
-        seed=seed,
-        trust_remote_code=trust_remote_code,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        gpu_memory_utilization=gpu_memory_utilization,
-        enforce_eager=enforce_eager,
-        kv_cache_dtype=kv_cache_dtype,
-        quantization_param_path=quantization_param_path,
-        device=device,
-        enable_prefix_caching=enable_prefix_caching,
-        download_dir=download_dir,
-        enable_chunked_prefill=enable_chunked_prefill,
-        max_num_batched_tokens=max_num_batched_tokens,
-    )
+    llm = LLM(model=model,
+              tokenizer=tokenizer,
+              quantization=quantization,
+              tensor_parallel_size=tensor_parallel_size,
+              seed=seed,
+              trust_remote_code=trust_remote_code,
+              dtype=dtype,
+              max_model_len=max_model_len,
+              gpu_memory_utilization=gpu_memory_utilization,
+              enforce_eager=enforce_eager,
+              kv_cache_dtype=kv_cache_dtype,
+              quantization_param_path=quantization_param_path,
+              device=device,
+              enable_prefix_caching=enable_prefix_caching,
+              download_dir=download_dir)
 
     # Add the requests to the engine.
-    prompts = []
-    sampling_params = []
     for prompt, _, output_len in requests:
-        prompts.append(prompt)
-        sampling_params.append(
-            SamplingParams(
-                n=n,
-                temperature=0.0 if use_beam_search else 1.0,
-                top_p=1.0,
-                use_beam_search=use_beam_search,
-                ignore_eos=True,
-                max_tokens=output_len,
-            ))
+        sampling_params = SamplingParams(
+            n=n,
+            temperature=0.0 if use_beam_search else 1.0,
+            top_p=1.0,
+            use_beam_search=use_beam_search,
+            ignore_eos=True,
+            max_tokens=output_len,
+        )
+        # FIXME(woosuk): Do not use internal method.
+        llm._add_request(
+            prompt=prompt,
+            prompt_token_ids=None,
+            sampling_params=sampling_params,
+        )
 
     start = time.perf_counter()
-    llm.generate(prompts, sampling_params, use_tqdm=True)
+    # FIXME(woosuk): Do not use internal method.
+    llm._run_engine(use_tqdm=True)
     end = time.perf_counter()
     return end - start
 
@@ -218,15 +213,15 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(
-            requests, args.model, args.tokenizer, args.quantization,
-            args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
-            args.trust_remote_code, args.dtype, args.max_model_len,
-            args.enforce_eager, args.kv_cache_dtype,
-            args.quantization_param_path, args.device,
-            args.enable_prefix_caching, args.enable_chunked_prefill,
-            args.max_num_batched_tokens, args.gpu_memory_utilization,
-            args.download_dir)
+        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
+                                args.quantization, args.tensor_parallel_size,
+                                args.seed, args.n, args.use_beam_search,
+                                args.trust_remote_code, args.dtype,
+                                args.max_model_len, args.enforce_eager,
+                                args.kv_cache_dtype,
+                                args.quantization_param_path, args.device,
+                                args.enable_prefix_caching,
+                                args.gpu_memory_utilization, args.download_dir)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -241,18 +236,6 @@ def main(args: argparse.Namespace):
                            for _, prompt_len, output_len in requests)
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} tokens/s")
-
-    # Output JSON results if specified
-    if args.output_json:
-        results = {
-            "elapsed_time": elapsed_time,
-            "num_requests": len(requests),
-            "total_num_tokens": total_num_tokens,
-            "requests_per_second": len(requests) / elapsed_time,
-            "tokens_per_second": total_num_tokens / elapsed_time,
-        }
-        with open(args.output_json, "w") as f:
-            json.dump(results, f, indent=4)
 
 
 if __name__ == "__main__":
@@ -278,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=[*QUANTIZATION_METHODS, None],
+                        choices=['awq', 'gptq', 'squeezellm', None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
@@ -323,13 +306,15 @@ if __name__ == "__main__":
                         action="store_true",
                         help="enforce eager execution")
     parser.add_argument(
-        '--kv-cache-dtype',
+        "--kv-cache-dtype",
         type=str,
-        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+        choices=["auto", "fp8"],
         default="auto",
-        help='Data type for kv cache storage. If "auto", will use model '
-        'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
-        'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
+        help=
+        'Data type for kv cache storage. If "auto", will use model data type. '
+        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
+        'common inference criteria.')
     parser.add_argument(
         '--quantization-param-path',
         type=str,
@@ -344,30 +329,17 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda", "cpu"],
-        help='device type for vLLM execution, supporting CUDA and CPU.')
+        choices=["cuda"],
+        help='device type for vLLM execution, supporting CUDA only currently.')
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
-    parser.add_argument("--enable-chunked-prefill",
-                        action='store_true',
-                        help="enable chunked prefill for vLLM backend.")
-    parser.add_argument('--max-num-batched-tokens',
-                        type=int,
-                        default=None,
-                        help='maximum number of batched tokens per '
-                        'iteration')
     parser.add_argument('--download-dir',
                         type=str,
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
-    parser.add_argument(
-        '--output-json',
-        type=str,
-        default=None,
-        help='Path to save the throughput results in JSON format.')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

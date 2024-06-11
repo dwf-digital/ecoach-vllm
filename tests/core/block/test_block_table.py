@@ -410,7 +410,8 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
         expected_src = static_block_table.physical_block_ids[cow_block_id]
         expected_dst = appender_block_table.physical_block_ids[cow_block_id]
 
-        assert (expected_src, expected_dst) in cows
+        assert expected_src in cows
+        assert expected_dst in cows[expected_src]
     else:
         # Otherwise, there should be no copy-on-write.
         assert not cows
@@ -489,7 +490,8 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
         expected_src = static_block_table.physical_block_ids[cow_block_id]
         expected_dst = appender_block_table.physical_block_ids[cow_block_id]
 
-        assert (expected_src, expected_dst) in cows
+        assert expected_src in cows
+        assert expected_dst in cows[expected_src]
 
     static_block_table.free()
     appender_block_table.free()

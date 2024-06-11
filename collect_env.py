@@ -63,7 +63,6 @@ DEFAULT_CONDA_PATTERNS = {
     "magma",
     "triton",
     "optree",
-    "nccl",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -74,7 +73,6 @@ DEFAULT_PIP_PATTERNS = {
     "triton",
     "optree",
     "onnx",
-    "nccl",
 }
 
 

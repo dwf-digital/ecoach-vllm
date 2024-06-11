@@ -1,9 +1,10 @@
-from typing import FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set
 
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
-from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.core.block.interfaces import Block, BlockAllocator
 
+BlockId = int
 Refcount = int
 
 
@@ -48,10 +49,8 @@ class NaiveBlockAllocator(BlockAllocator):
             allocator=self,
         )
 
-    def allocate_immutable(self,
-                           prev_block: Optional[Block],
-                           token_ids: List[int],
-                           device: Optional[Device] = None) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
 
@@ -64,14 +63,11 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             Block: The newly allocated immutable block.
         """
-        assert device is None
         block = self.allocate_mutable(prev_block=prev_block)
         block.append_token_ids(token_ids)
         return block
 
-    def allocate_mutable(self,
-                         prev_block: Optional[Block],
-                         device: Optional[Device] = None) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         """Allocates a new mutable block, linked to the previous block.
 
         Args:
@@ -82,7 +78,6 @@ class NaiveBlockAllocator(BlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        assert device is None
         block_id = self._allocate_new_block_id()
         return self._create_block(
             prev_block=prev_block,
@@ -93,7 +88,6 @@ class NaiveBlockAllocator(BlockAllocator):
         )
 
     def free(self, block: Block) -> None:
-        assert block.block_id is not None
         self._free_block_id(block.block_id)
 
         # Mark the block as having no allocation.
@@ -117,7 +111,6 @@ class NaiveBlockAllocator(BlockAllocator):
         for block in source_blocks:
 
             # Increment refcount for each block.
-            assert block.block_id is not None
             refcount = self._refcounter.incr(block.block_id)
             assert refcount != 1, "can't fork free'd block"
 
@@ -135,9 +128,6 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
-
-    def get_num_total_blocks(self) -> int:
-        return len(self._all_block_indices)
 
     def _allocate_new_block_id(self) -> BlockId:
         if not self._free_block_indices:
@@ -158,7 +148,7 @@ class NaiveBlockAllocator(BlockAllocator):
         return self._refcounter
 
     @property
-    def all_block_ids(self) -> FrozenSet[int]:
+    def all_block_ids(self):
         return self._all_block_indices
 
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
@@ -175,25 +165,16 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
+    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            List[Tuple[BlockId, BlockId]]: A list mapping source
-                block indices to destination block indices.
+            Dict[BlockId, List[BlockId]]: A dictionary mapping source
+                block indices to lists of destination block indices.
         """
         return self._cow_tracker.clear_cows()
 
-    def mark_blocks_as_accessed(self, block_ids: List[int],
-                                now: float) -> None:
-        """Mark blocks as accessed, used in prefix caching.
-
-        Since the naive allocator does not implement prefix caching, we do
-        nothing.
-        """
-        pass
-
-    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
+    def mark_blocks_as_computed(self) -> None:
         """Mark blocks as computed, used in prefix caching.
 
         Since the naive allocator does not implement prefix caching, we do
@@ -209,9 +190,6 @@ class NaiveBlockAllocator(BlockAllocator):
         an empty list.
         """
         return []
-
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-        raise NotImplementedError
 
 
 class NaiveBlock(Block):
@@ -237,13 +215,13 @@ class NaiveBlock(Block):
     """
 
     def __init__(self,
-                 prev_block: Optional[Block],
+                 prev_block: Block,
                  token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None):
-        self._token_ids: List[int] = []
+        self._token_ids = []
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -270,22 +248,6 @@ class NaiveBlock(Block):
         self._token_ids.extend(token_ids)
 
     @property
-    def computed(self) -> bool:
-        raise NotImplementedError
-
-    @computed.setter
-    def computed(self, value) -> None:
-        raise NotImplementedError
-
-    @property
-    def last_accessed(self) -> float:
-        raise NotImplementedError
-
-    @last_accessed.setter
-    def last_accessed(self, last_accessed_ts: float):
-        raise NotImplementedError
-
-    @property
     def block_id(self) -> Optional[int]:
         return self._block_id
 
@@ -305,14 +267,9 @@ class NaiveBlock(Block):
     def token_ids(self) -> List[int]:
         return self._token_ids
 
-    @property
     def block_size(self) -> int:
         return self._block_size
 
     @property
     def prev_block(self) -> Optional["Block"]:
         return self._prev_block
-
-    @property
-    def content_hash(self) -> Optional[int]:
-        return None

@@ -1,58 +1,16 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Dict, List, Literal, Optional, Union, Tuple
+from typing import Dict, List, Literal, Optional, Union, Tuple
 
-import openai.types.chat
 import torch
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-# pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Annotated, Required, TypedDict
+from pydantic import BaseModel, Field, conint, model_validator
 
-from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
 
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
-ChatCompletionContentPartParam = Union[
-    openai.types.chat.ChatCompletionContentPartParam,
-    CustomChatCompletionContentPartParam]
-
-
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: str
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-
-
-ChatCompletionMessageParam = Union[
-    openai.types.chat.ChatCompletionMessageParam,
-    CustomChatCompletionMessageParam]
-
-
-class OpenAIBaseModel(BaseModel):
-    # OpenAI API does not allow extra fields
-    model_config = ConfigDict(extra="forbid")
-
-
-class ErrorResponse(OpenAIBaseModel):
+class ErrorResponse(BaseModel):
     object: str = "error"
     message: str
     type: str
@@ -60,7 +18,7 @@ class ErrorResponse(OpenAIBaseModel):
     code: int
 
 
-class ModelPermission(OpenAIBaseModel):
+class ModelPermission(BaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -72,10 +30,10 @@ class ModelPermission(OpenAIBaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: bool = False
+    is_blocking: str = False
 
 
-class ModelCard(OpenAIBaseModel):
+class ModelCard(BaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -85,26 +43,26 @@ class ModelCard(OpenAIBaseModel):
     permission: List[ModelPermission] = Field(default_factory=list)
 
 
-class ModelList(OpenAIBaseModel):
+class ModelList(BaseModel):
     object: str = "list"
     data: List[ModelCard] = Field(default_factory=list)
 
 
-class UsageInfo(OpenAIBaseModel):
+class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
 
 
-class ResponseFormat(OpenAIBaseModel):
+class ResponseFormat(BaseModel):
     # type must be "json_object" or "text"
-    type: Literal["text", "json_object"]
+    type: str = Literal["text", "json_object"]
 
 
-class ChatCompletionRequest(OpenAIBaseModel):
+class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[ChatCompletionMessageParam]
+    messages: List[Dict[str, str]]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -114,9 +72,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
@@ -143,20 +99,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=False,
         description=(
             "If true, the new message will be prepended with the last message "
-            "if they belong to the same role."),
+            "if they belong to the same role."
+        ),
     )
     add_generation_prompt: Optional[bool] = Field(
         default=True,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
     )
     include_stop_str_in_output: Optional[bool] = Field(
         default=False,
         description=(
             "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
+            "This is only applied when the stop or stop_token_ids is set."
+        ),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -164,30 +123,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     guided_regex: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
+        description=("If specified, the output will follow the regex pattern."),
     )
     guided_choice: Optional[List[str]] = Field(
         default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
+        description=("If specified, the output will be exactly one of the choices."),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
+        description=("If specified, the output will follow the context free grammar."),
     )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be either "
-            "'outlines' / 'lm-format-enforcer'"))
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."))
 
     # doc: end-chat-completion-extra-params
 
@@ -199,9 +144,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.logit_bias:
 
             def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
+                token_ids: List[int], logits: torch.Tensor
+            ) -> torch.Tensor:
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -240,19 +184,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
+        guide_count = sum(
+            [
+                "guided_json" in data and data["guided_json"] is not None,
+                "guided_regex" in data and data["guided_regex"] is not None,
+                "guided_choice" in data and data["guided_choice"] is not None,
+            ]
+        )
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "('guided_json', 'guided_regex' or 'guided_choice')."
+            )
         return data
 
 
-class CompletionRequest(OpenAIBaseModel):
+class CompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str
@@ -263,11 +210,9 @@ class CompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    n: int = 1
+    n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = Field(None,
-                                ge=torch.iinfo(torch.long).min,
-                                le=torch.iinfo(torch.long).max)
+    seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     suffix: Optional[str] = None
@@ -287,7 +232,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[conint(ge=1)] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -295,14 +240,16 @@ class CompletionRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Whether to include the stop string in the output. "
-            "This is only applied when the stop or stop_token_ids is set."),
+            "This is only applied when the stop or stop_token_ids is set."
+        ),
     )
     response_format: Optional[ResponseFormat] = Field(
         default=None,
-        description=
-        ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'} or {'type': 'text' } is "
-         "supported."),
+        description=(
+            "Similar to chat completion, this parameter specifies the format of "
+            "output. Only {'type': 'json_object'} or {'type': 'text' } is "
+            "supported."
+        ),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -310,30 +257,17 @@ class CompletionRequest(OpenAIBaseModel):
     )
     guided_regex: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, the output will follow the regex pattern."),
+        description=("If specified, the output will follow the regex pattern."),
     )
     guided_choice: Optional[List[str]] = Field(
         default=None,
-        description=(
-            "If specified, the output will be exactly one of the choices."),
+        description=("If specified, the output will be exactly one of the choices."),
     )
     guided_grammar: Optional[str] = Field(
         default=None,
-        description=(
-            "If specified, the output will follow the context free grammar."),
+        description=("If specified, the output will follow the context free grammar."),
     )
-    guided_decoding_backend: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default guided decoding backend "
-            "of the server for this specific request. If set, must be one of "
-            "'outlines' / 'lm-format-enforcer'"))
-    guided_whitespace_pattern: Optional[str] = Field(
-        default=None,
-        description=(
-            "If specified, will override the default whitespace pattern "
-            "for guided json decoding."))
+    
     control_vectors: Optional[List[dict]] = Field(
         default=None,
         description="A list of dict with keys `name` and `strength`. "
@@ -354,9 +288,8 @@ class CompletionRequest(OpenAIBaseModel):
         if self.logit_bias:
 
             def logit_bias_logits_processor(
-                    token_ids: List[int],
-                    logits: torch.Tensor) -> torch.Tensor:
-                assert self.logit_bias is not None
+                token_ids: List[int], logits: torch.Tensor
+            ) -> torch.Tensor:
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -396,58 +329,44 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
-        guide_count = sum([
-            "guided_json" in data and data["guided_json"] is not None,
-            "guided_regex" in data and data["guided_regex"] is not None,
-            "guided_choice" in data and data["guided_choice"] is not None
-        ])
+        guide_count = sum(
+            [
+                "guided_json" in data and data["guided_json"] is not None,
+                "guided_regex" in data and data["guided_regex"] is not None,
+                "guided_choice" in data and data["guided_choice"] is not None,
+            ]
+        )
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
+                "('guided_json', 'guided_regex' or 'guided_choice')."
+            )
         return data
 
 
-class EmbeddingRequest(BaseModel):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
-    model: str
-    input: Union[List[int], List[List[int]], str, List[str]]
-    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
-    dimensions: Optional[int] = None
-    user: Optional[str] = None
-
-    # doc: begin-embedding-pooling-params
-    additional_data: Optional[Any] = None
-
-    # doc: end-embedding-pooling-params
-
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
-
-
-class LogProbs(OpenAIBaseModel):
+class LogProbs(BaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
     top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
 
 
-class CompletionResponseChoice(OpenAIBaseModel):
+class CompletionResponseChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = Field(
+    finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
             "to stop, None if the completion finished for some other reason "
-            "including encountering the EOS token"),
+            "including encountering the EOS token"
+        ),
     )
 
 
-class CompletionResponse(OpenAIBaseModel):
+class CompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -456,21 +375,22 @@ class CompletionResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
-class CompletionResponseStreamChoice(OpenAIBaseModel):
+class CompletionResponseStreamChoice(BaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = Field(
+    finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
             "to stop, None if the completion finished for some other reason "
-            "including encountering the EOS token"),
+            "including encountering the EOS token"
+        ),
     )
 
 
-class CompletionStreamResponse(OpenAIBaseModel):
+class CompletionStreamResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -479,35 +399,20 @@ class CompletionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class EmbeddingResponseData(BaseModel):
-    index: int
-    object: str = "embedding"
-    embedding: List[float]
-
-
-class EmbeddingResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
-    object: str = "list"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str
-    data: List[EmbeddingResponseData]
-    usage: UsageInfo
-
-
-class ChatMessage(OpenAIBaseModel):
+class ChatMessage(BaseModel):
     role: str
     content: str
 
 
-class ChatCompletionResponseChoice(OpenAIBaseModel):
+class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = None
 
 
-class ChatCompletionResponse(OpenAIBaseModel):
+class ChatCompletionResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -516,64 +421,23 @@ class ChatCompletionResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
-class DeltaMessage(OpenAIBaseModel):
+class DeltaMessage(BaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
 
 
-class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
+class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    finish_reason: Optional[Literal["stop", "length"]] = None
+    stop_reason: Union[None, int, str] = None
 
 
-class ChatCompletionStreamResponse(OpenAIBaseModel):
+class ChatCompletionStreamResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
-
-
-class BatchRequestInput(OpenAIBaseModel):
-    """
-    The per-line object of the batch input file.
-
-    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
-    """
-
-    # A developer-provided per-request id that will be used to match outputs to
-    # inputs. Must be unique for each request in a batch.
-    custom_id: str
-
-    # The HTTP method to be used for the request. Currently only POST is
-    # supported.
-    method: str
-
-    # The OpenAI API relative URL to be used for the request. Currently
-    # /v1/chat/completions is supported.
-    url: str
-
-    # The parameteters of the request.
-    body: Union[ChatCompletionRequest, ]
-
-
-class BatchRequestOutput(OpenAIBaseModel):
-    """
-    The per-line object of the batch output and error files
-    """
-
-    id: str
-
-    # A developer-provided per-request id that will be used to match outputs to
-    # inputs.
-    custom_id: str
-
-    response: Optional[ChatCompletionResponse]
-
-    # For requests that failed with a non-HTTP error, this will contain more
-    # information on the cause of the failure.
-    error: Optional[Any]

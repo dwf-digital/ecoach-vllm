@@ -19,7 +19,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 import torch
 from torch import nn
@@ -27,23 +27,23 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parallel_utils.communication_op import (
+    tensor_model_parallel_all_reduce)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
@@ -78,8 +78,7 @@ class FalconAttention(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
 
@@ -118,7 +117,7 @@ class FalconAttention(nn.Module):
             self.total_num_kv_heads,
             bias=config.bias,
             skip_bias_add=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -132,7 +131,7 @@ class FalconAttention(nn.Module):
             self.hidden_size,
             bias=config.bias,
             skip_bias_add=True,
-            quant_config=quant_config,
+            linear_method=linear_method,
             reduce_results=self.reduce_row_parallel_results)
 
         self.use_rotary = config.rotary
@@ -153,8 +152,7 @@ class FalconAttention(nn.Module):
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   self.inv_norm_factor,
-                                  num_kv_heads=self.num_kv_heads,
-                                  quant_config=quant_config)
+                                  num_kv_heads=self.num_kv_heads)
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -166,15 +164,12 @@ class FalconAttention(nn.Module):
                                   self.head_dim,
                                   self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
-                                  alibi_slopes=alibi_slopes,
-                                  quant_config=quant_config)
+                                  alibi_slopes=alibi_slopes)
         else:
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   scale=self.inv_norm_factor,
-                                  num_kv_heads=self.num_kv_heads,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
+                                  num_kv_heads=self.num_kv_heads)
 
     def forward(
         self,
@@ -199,7 +194,7 @@ class FalconMLP(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -208,7 +203,8 @@ class FalconMLP(nn.Module):
                                                   4 * hidden_size,
                                                   bias=config.bias,
                                                   skip_bias_add=True,
-                                                  quant_config=quant_config)
+                                                  linear_method=linear_method)
+        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
@@ -218,7 +214,7 @@ class FalconMLP(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
-            quant_config=quant_config)
+            linear_method=linear_method)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE(zhuohan): Following huggingface, we do not fuse bias add here.
@@ -235,15 +231,13 @@ class FalconDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.self_attention = FalconAttention(config, cache_config,
-                                              quant_config)
-        self.mlp = FalconMLP(config, quant_config)
+        self.self_attention = FalconAttention(config, linear_method)
+        self.mlp = FalconMLP(config, linear_method)
         self.config = config
 
         if config.new_decoder_architecture:
@@ -319,8 +313,7 @@ class FalconModel(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
@@ -336,7 +329,7 @@ class FalconModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            FalconDecoderLayer(config, cache_config, quant_config)
+            FalconDecoderLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -368,13 +361,12 @@ class FalconForCausalLM(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.transformer = FalconModel(config, cache_config, quant_config)
+        self.linear_method = linear_method
+        self.transformer = FalconModel(config, linear_method)
         self.lm_head_weight = self.transformer.word_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -408,7 +400,11 @@ class FalconForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self,
+                     model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -418,7 +414,8 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in weights:
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
             if name == "lm_head.weight":
                 # Falcon uses tied embeddings.
                 continue

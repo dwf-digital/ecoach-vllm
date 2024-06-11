@@ -6,18 +6,13 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
-from vllm.pooling_params import PoolingParams
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 from vllm.control_vectors.data import ControlVectorData
-
-logger = init_logger(__name__)
-
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -37,9 +32,6 @@ class LLM:
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
-        skip_tokenizer_init: If true, skip initialization of tokenizer and
-            detokenizer. Expect valid prompt_token_ids and None for prompt
-            from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
@@ -50,11 +42,10 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
-            we support "awq", "gptq", "squeezellm", and "fp8" (experimental).
-            If None, we first check the `quantization_config` attribute in the
-            model config file. If that is None, we assume the model weights are
-            not quantized and use `dtype` to determine the data type of
-            the weights.
+            we support "awq", "gptq" and "squeezellm". If None, we first check
+            the `quantization_config` attribute in the model config file. If
+            that is None, we assume the model weights are not quantized and use
+            `dtype` to determine the data type of the weights.
         revision: The specific model version to use. It can be a branch name,
             a tag name, or a commit id.
         tokenizer_revision: The specific tokenizer version to use. It can be a
@@ -75,9 +66,6 @@ class LLM:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
-        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
             to eager mode.
         disable_custom_all_reduce: See ParallelConfig
     """
@@ -87,7 +75,6 @@ class LLM:
         model: str,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
-        skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
@@ -98,9 +85,8 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
         enforce_eager: bool = False,
-        max_context_len_to_capture: Optional[int] = None,
-        max_seq_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = False,
+        max_context_len_to_capture: int = 8192,
+        disable_custom_all_reduce: bool = True,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -109,7 +95,6 @@ class LLM:
             model=model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
-            skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
@@ -121,7 +106,6 @@ class LLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
-            max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
@@ -142,8 +126,7 @@ class LLM:
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        List[SamplingParams]]] = None,
+        sampling_params: Optional[SamplingParams] = None,
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
@@ -159,10 +142,7 @@ class LLM:
         Args:
             prompts: A list of prompts to generate completions for.
             sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters. 
-                When it is a single value, it is applied to every prompt. 
-                When it is a list, the list must have the same length as the 
-                prompts and it is paired one by one with the prompt.
+                None, we use the default sampling parameters.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
@@ -170,97 +150,12 @@ class LLM:
             multi_modal_data: Multi modal data.
 
         Returns:
-            A list of `RequestOutput` objects containing the
-            generated completions in the same order as the input prompts.
-        """
-        if sampling_params is None:
-            # Use default sampling params.
-            sampling_params = SamplingParams()
-
-        requests_data = self._validate_and_prepare_requests(
-            prompts,
-            sampling_params,
-            prompt_token_ids,
-            lora_request,
-            multi_modal_data,
-        )
-
-        # Add requests to the engine and run the engine
-        for request_data in requests_data:
-            self._add_request(**request_data)
-
-        return self._run_engine(use_tqdm)
-
-    def encode(
-        self,
-        prompts: Optional[Union[str, List[str]]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       List[PoolingParams]]] = None,
-        prompt_token_ids: Optional[List[List[int]]] = None,
-        use_tqdm: bool = True,
-        lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
-    ) -> List[EmbeddingRequestOutput]:
-        """Generates the completions for the input prompts.
-
-        NOTE: This class automatically batches the given prompts, considering
-        the memory constraint. For the best performance, put all of your prompts
-        into a single list and pass it to this method.
-
-        Args:
-            prompts: A list of prompts to generate completions for.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
-            prompt_token_ids: A list of token IDs for the prompts. If None, we
-                use the tokenizer to convert the prompts to token IDs.
-            use_tqdm: Whether to use tqdm to display the progress bar.
-            lora_request: LoRA request to use for generation, if any.
-            multi_modal_data: Multi modal data.
-
-        Returns:
-            A list of `EmbeddingRequestOutput` objects containing the
-            generated embeddings in the same order as the input prompts.
-        """
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-
-        requests_data = self._validate_and_prepare_requests(
-            prompts,
-            pooling_params,
-            prompt_token_ids,
-            lora_request,
-            multi_modal_data,
-        )
-
-        # Add requests to the engine and run the engine
-        for request_data in requests_data:
-            self._add_request(**request_data)
-
-        return self._run_engine(use_tqdm)
-
-    def _validate_and_prepare_requests(
-        self,
-        prompts: Optional[Union[str, List[str]]],
-        params: Union[Union[SamplingParams, PoolingParams],
-                      List[Union[SamplingParams,
-                                 PoolingParams]]],  # Unified parameter
-        prompt_token_ids: Optional[List[List[int]]] = None,
-        lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
-    ) -> List[dict]:
-        """Validates and prepares request data for adding to the engine.
-
-        Ensures prompts and token IDs are consistent, and returns a list of
-        dictionaries with request data for further processing.
+            A list of `RequestOutput` objects containing the generated
+            completions in the same order as the input prompts.
         """
         if prompts is None and prompt_token_ids is None:
             raise ValueError("Either prompts or prompt_token_ids must be "
                              "provided.")
-        if self.llm_engine.model_config.skip_tokenizer_init \
-            and prompts is not None:
-            raise ValueError("prompts must be None if skip_tokenizer_init "
-                             "is True")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
@@ -268,52 +163,38 @@ class LLM:
                 and len(prompts) != len(prompt_token_ids)):
             raise ValueError("The lengths of prompts and prompt_token_ids "
                              "must be the same.")
+        if sampling_params is None:
+            # Use default sampling params.
+            sampling_params = SamplingParams()
 
-        if prompts is not None:
-            num_requests = len(prompts)
-        else:
-            assert prompt_token_ids is not None
-            num_requests = len(prompt_token_ids)
-
-        if isinstance(params, list) and len(params) != num_requests:
-            raise ValueError("The lengths of prompts and params "
-                             "must be the same.")
         if multi_modal_data:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
-        requests_data = []
+        num_requests = len(prompts) if prompts is not None else len(
+            prompt_token_ids)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
-
-            multi_modal_item = MultiModalData(
-                type=multi_modal_data.type,
-                data=multi_modal_data.data[i].unsqueeze(0),
-            ) if multi_modal_data else None
-            # ) if multi_modal_data else None,
-            # control_vectors=control_vectors
-
-            requests_data.append({
-                "prompt":
+            self._add_request(
                 prompt,
-                "params":
-                params[i] if isinstance(params, list) else params,
-                "prompt_token_ids":
+                sampling_params,
                 token_ids,
-                "lora_request":
-                lora_request,
-                "multi_modal_data":
-                multi_modal_item,
-            })
-
-        return requests_data
+                lora_request=lora_request,
+                # Get ith image while maintaining the batch dim.
+                multi_modal_data=MultiModalData(
+                    type=multi_modal_data.type,
+                    data=multi_modal_data.data[i].unsqueeze(0))
+                if multi_modal_data else None,
+                control_vectors=control_vectors
+            )
+        return self._run_engine(use_tqdm)
 
     def _add_request(
         self,
         prompt: Optional[str],
-        params: Union[SamplingParams, PoolingParams],
+        sampling_params: SamplingParams,
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
@@ -322,39 +203,27 @@ class LLM:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     prompt,
-                                    params,
+                                    sampling_params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
                                     multi_modal_data=multi_modal_data,
                                     control_vectors=control_vectors)
 
-    def _run_engine(
-            self, use_tqdm: bool
-    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(
-                total=num_requests,
-                desc="Processed prompts",
-                dynamic_ncols=True,
-                postfix=f"Generation Speed: {0:.2f} toks/s",
-            )
+            pbar = tqdm(total=num_requests,
+                        desc="Processed prompts",
+                        dynamic_ncols=True)
         # Run the engine.
-        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
-        total_toks = 0
+        outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        if isinstance(output, RequestOutput):
-                            # Calculate tokens only for RequestOutput
-                            total_toks += sum(
-                                len(stp.token_ids) for stp in output.outputs)
-                            spd = total_toks / pbar.format_dict["elapsed"]
-                            pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()

@@ -1,9 +1,10 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import SequenceGroupMetadata
 
 
 @dataclass
@@ -23,9 +24,9 @@ class SpeculativeProposals:
 
     def __repr__(self):
         return (f"SpeculativeProposals("
-                f"proposal_token_ids={self.proposal_token_ids}, "
+                f"proposal_token_ids={self.proposal_token_ids.shape}, "
                 f"proposal_probs={self.proposal_probs.shape}, "
-                f"proposal_lens={self.proposal_lens})")
+                f"proposal_lens={self.proposal_lens.shape})")
 
 
 @dataclass
@@ -36,11 +37,6 @@ class SpeculativeScores:
 
     # Probabilities of the speculative tokens according to the scoring model.
     probs: torch.Tensor
-
-    # Log-probabilities of the speculative tokens according to the scoring
-    # model. These values can be used to generate Logprob objects that are
-    # returned to the user.
-    logprobs: torch.Tensor
 
     # Token ids sampled from the scoring model. Used for speculative bonus
     # tokens and also non-speculative normal decoding.
@@ -57,7 +53,11 @@ class SpeculativeProposer(ABC):
     @abstractmethod
     def get_proposals(
         self,
-        execute_model_req: ExecuteModelRequest,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        max_proposal_len: int,
     ) -> SpeculativeProposals:
         raise NotImplementedError
 
@@ -67,7 +67,11 @@ class SpeculativeScorer(ABC):
     @abstractmethod
     def score_proposals(
         self,
-        execute_model_req: ExecuteModelRequest,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        k: int,
         proposals: SpeculativeProposals,
-    ) -> SpeculativeScores:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

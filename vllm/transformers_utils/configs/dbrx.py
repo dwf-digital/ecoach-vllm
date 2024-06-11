@@ -12,7 +12,7 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {} # type: ignore
+DBRX_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
 class DbrxAttentionConfig(PretrainedConfig):
@@ -72,10 +72,9 @@ class DbrxAttentionConfig(PretrainedConfig):
             and config_dict["model_type"] != cls.model_type
         ):
             logger.warning(
-                "You are using a model of type %s to instantiate a model of "
-                "type %s. This is not supported for all configurations of "
-                "models and can yield errors.",
-                config_dict["model_type"], cls.model_type)
+                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
+                + f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
+            )
 
         return cls.from_dict(config_dict, **kwargs)
 
@@ -152,9 +151,9 @@ class DbrxFFNConfig(PretrainedConfig):
             and config_dict["model_type"] != cls.model_type
         ):
             logger.warning(
-                "You are using a model of type %s to instantiate a model of "
-                "type %s. This is not supported for all "
-                "configurations of models and can yield errors.", config_dict["model_type"], cls.model_type)
+                f"You are using a model of type {config_dict['model_type']} to instantiate a model of type "
+                + f"{cls.model_type}. This is not supported for all configurations of models and can yield errors."
+            )
 
         return cls.from_dict(config_dict, **kwargs)
 

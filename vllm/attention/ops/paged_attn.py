@@ -1,9 +1,9 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
@@ -13,11 +13,17 @@ _PARTITION_SIZE = 512
 @dataclass
 class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
-    # (batch_size,). The length of sequences (entire tokens seen so far) per
-    # sequence.
-    seq_lens_tensor: Optional[torch.Tensor]
-    # Maximum sequence length in the batch. 0 if it is prefill-only batch.
-    max_decode_seq_len: int
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+    # (batch_size,). The length of context (tokens stored in KV cache) per
+    # sequence. WARNING: When it is a prefill request, it doesn't include new
+    # tokens. When it is for decoding, it includes a new token.
+    context_lens: Optional[torch.Tensor]
+    # Maximum context length in the batch.
+    max_context_len: Optional[int]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -25,6 +31,7 @@ class PagedAttentionMetadata:
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
     block_tables: Optional[torch.Tensor]
+    kv_cache_dtype: str
 
 
 class PagedAttention:
@@ -68,7 +75,7 @@ class PagedAttention:
         kv_cache_dtype: str,
         kv_scale: float,
     ) -> None:
-        ops.reshape_and_cache(
+        cache_ops.reshape_and_cache(
             key,
             value,
             key_cache,
@@ -84,8 +91,8 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
+        context_lens: torch.Tensor,
+        max_context_len: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
@@ -96,7 +103,7 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
+        max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
@@ -105,7 +112,7 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = (max_seq_len <= 8192
+        use_v1 = (max_context_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
         if use_v1:
             # Run PagedAttention V1.
@@ -117,9 +124,9 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                seq_lens,
+                context_lens,
                 block_size,
-                max_seq_len,
+                max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
@@ -149,9 +156,9 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                seq_lens,
+                context_lens,
                 block_size,
-                max_seq_len,
+                max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
@@ -166,12 +173,11 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        seq_lens_tensor: torch.Tensor,
+        subquery_start_loc: torch.Tensor,
+        prompt_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
-        max_query_len: int,
+        max_subquery_len: int,
         alibi_slopes: Optional[torch.Tensor],
-        sliding_window: Optional[int],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -182,13 +188,12 @@ class PagedAttention:
             key_cache,
             value_cache,
             block_tables,
-            # query_start_loc is (batch_size + 1,)
-            query_start_loc[:-1],
-            seq_lens_tensor,
+            # subquery_start_loc is (batch_size + 1,)
+            subquery_start_loc[:-1],
+            prompt_lens_tensor,
             context_lens,
-            max_query_len,
+            max_subquery_len,
             alibi_slopes,
-            sliding_window,
         )
         return output
 
@@ -196,21 +201,21 @@ class PagedAttention:
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        src_to_dst: Dict[int, int],
     ) -> None:
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
-        ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
+        cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
 
         src_value_cache = src_kv_cache[1]
         dst_value_cache = dst_kv_cache[1]
-        ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
+        cache_ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
+        src_to_dists: Dict[int, List[int]],
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
-        ops.copy_blocks(key_caches, value_caches, src_to_dists)
+        cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)

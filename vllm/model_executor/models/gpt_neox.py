@@ -16,28 +16,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPT-NeoX model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from torch import nn
 from transformers import GPTNeoXConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 
@@ -46,8 +46,7 @@ class GPTNeoXAttention(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
@@ -66,13 +65,13 @@ class GPTNeoXAttention(nn.Module):
             self.head_size,
             self.total_num_heads,
             bias=self.bias,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=self.bias,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
@@ -86,11 +85,7 @@ class GPTNeoXAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_size,
-                              scaling,
-                              cache_config=cache_config,
-                              quant_config=quant_config)
+        self.attn = Attention(self.num_heads, self.head_size, scaling)
 
     def forward(
         self,
@@ -112,19 +107,20 @@ class GPTNeoXMLP(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
         self.dense_4h_to_h = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
-            quant_config=quant_config,
+            linear_method=linear_method,
         )
+        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.hidden_act, quant_config,
                               config.intermediate_size)
 
@@ -140,8 +136,7 @@ class GPTNeoXLayer(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.use_parallel_residual = config.use_parallel_residual
@@ -149,8 +144,8 @@ class GPTNeoXLayer(nn.Module):
                                             eps=config.layer_norm_eps)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      eps=config.layer_norm_eps)
-        self.attention = GPTNeoXAttention(config, cache_config, quant_config)
-        self.mlp = GPTNeoXMLP(config, quant_config)
+        self.attention = GPTNeoXAttention(config, linear_method)
+        self.mlp = GPTNeoXMLP(config, linear_method)
 
     def forward(
         self,
@@ -189,8 +184,7 @@ class GPTNeoXModel(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
@@ -200,7 +194,7 @@ class GPTNeoXModel(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            GPTNeoXLayer(config, cache_config, quant_config)
+            GPTNeoXLayer(config, linear_method)
             for _ in range(config.num_hidden_layers)
         ])
         self.final_layer_norm = nn.LayerNorm(config.hidden_size,
@@ -231,13 +225,12 @@ class GPTNeoXForCausalLM(nn.Module):
     def __init__(
         self,
         config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
-        self.quant_config = quant_config
-        self.gpt_neox = GPTNeoXModel(config, cache_config, quant_config)
+        self.linear_method = linear_method
+        self.gpt_neox = GPTNeoXModel(config, linear_method)
         self.embed_out = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
@@ -270,16 +263,16 @@ class GPTNeoXForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self,
+                     model_name_or_path: str,
+                     cache_dir: Optional[str] = None,
+                     load_format: str = "auto",
+                     revision: Optional[str] = None):
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
+        for name, loaded_weight in hf_model_weights_iterator(
+                model_name_or_path, cache_dir, load_format, revision):
             if ("attention.bias" in name or "attention.masked_bias" in name
                     or "rotary_emb.inv_freq" in name):
-                continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using OpenRLHF may include
-                # these tensors in the checkpoint. Skip them.
                 continue
             param = params_dict[name]
 

@@ -9,7 +9,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 # Architecture -> (module, class).
-_GENERATION_MODELS = {
+_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
@@ -42,11 +42,10 @@ _GENERATION_MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
-    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
+    "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
-    "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -54,15 +53,8 @@ _GENERATION_MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
-    "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 }
-
-_EMBEDDING_MODELS = {
-    "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
-}
-
-_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
 
 # Architecture -> type.
 # out of tree models
@@ -98,8 +90,8 @@ class ModelRegistry:
                     "ROCm for now.")
             if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
                 logger.warning(
-                    "Model architecture %s is partially supported by ROCm: %s",
-                    model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+                    f"Model architecture {model_arch} is partially supported "
+                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
         module_name, model_cls_name = _MODELS[model_arch]
         module = importlib.import_module(
@@ -114,15 +106,11 @@ class ModelRegistry:
     def register_model(model_arch: str, model_cls: Type[nn.Module]):
         if model_arch in _MODELS:
             logger.warning(
-                "Model architecture %s is already registered, and will be "
-                "overwritten by the new model class %s.", model_arch,
-                model_cls.__name__)
+                f"Model architecture {model_arch} is already registered, "
+                "and will be overwritten by the new model "
+                f"class {model_cls.__name__}.")
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
-
-    @staticmethod
-    def is_embedding_model(model_arch: str) -> bool:
-        return model_arch in _EMBEDDING_MODELS
 
 
 __all__ = [

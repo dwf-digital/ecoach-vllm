@@ -1,18 +1,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
-                    TypeVar)
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
-
-    @staticmethod
-    @abstractmethod
-    def get_name() -> str:
-        raise NotImplementedError
 
     @staticmethod
     @abstractmethod
@@ -39,7 +33,7 @@ class AttentionBackend(ABC):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: torch.Tensor,
+        src_to_dst: Dict[int, int],
     ) -> None:
         raise NotImplementedError
 
@@ -47,59 +41,25 @@ class AttentionBackend(ABC):
     @abstractmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
+        src_to_dists: Dict[int, List[int]],
     ) -> None:
         raise NotImplementedError
 
 
 @dataclass
 class AttentionMetadata:
-    """Attention metadata for prefill and decode batched together."""
-    # Total number of prefill requests.
-    num_prefills: int
-    # Number of prefill tokens.
-    num_prefill_tokens: int
-    # Number of decode tokens. Note that it is equivalent to the number of
-    # decode requests.
-    num_decode_tokens: int
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
 
-    @property
-    @abstractmethod
-    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
-        """Return the attention metadata that's required to run prefill
-        attention."""
-        pass
-
-    @property
-    @abstractmethod
-    def decode_metadata(self) -> Optional["AttentionMetadata"]:
-        """Return the attention metadata that's required to run decode
-        attention."""
-        pass
-
-    def asdict_zerocopy(self,
-                        skip_fields: Optional[Set[str]] = None
-                        ) -> Dict[str, Any]:
+    def asdict_zerocopy(self) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
-        if skip_fields is None:
-            skip_fields = set()
         # Note that if we add dataclasses as fields, they will need
         # similar handling.
         return {
             field.name: getattr(self, field.name)
-            for field in fields(self) if field.name not in skip_fields
+            for field in fields(self)
         }
 
 
-T = TypeVar("T", bound=AttentionMetadata)
-
-
-class AttentionImpl(ABC, Generic[T]):
+class AttentionImpl(ABC):
 
     @abstractmethod
     def __init__(
@@ -110,7 +70,6 @@ class AttentionImpl(ABC, Generic[T]):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
     ) -> None:
         raise NotImplementedError
 
@@ -121,7 +80,7 @@ class AttentionImpl(ABC, Generic[T]):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: T,
-        kv_scale: float = 1.0,
+        attn_metadata: AttentionMetadata,
+        kv_scale: float,
     ) -> torch.Tensor:
         raise NotImplementedError

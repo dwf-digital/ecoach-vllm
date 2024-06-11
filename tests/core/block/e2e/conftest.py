@@ -1,9 +1,8 @@
 import pytest
 
+from tests.conftest import cleanup
 from vllm import LLM
 from vllm.model_executor.utils import set_random_seed
-
-from ....conftest import cleanup
 
 
 @pytest.fixture
